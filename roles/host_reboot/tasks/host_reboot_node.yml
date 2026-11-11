@@ -87,8 +87,16 @@
         loop_var: svc
         label: "{{ svc.name }}"
 
+    - name: "Validate Libvirt socket via functional virsh query on {{ selected_node }}"
+      ansible.builtin.command: virsh uri
+      delegate_to: "{{ selected_node }}"
+      register: virsh_socket_check
+      failed_when: false
+      changed_when: false
+
     - name: "Collect journal errors from {{ selected_node }} for current boot"
       when: validation.host_reboot.check_journal_errors | d(true)
+      become: true
       ansible.builtin.shell: |
         journalctl -b 0 -p {{ validation.host_reboot.journal_priority | d('err') }} --no-pager -o short-precise
       delegate_to: "{{ selected_node }}"
@@ -175,18 +183,36 @@
         loop_var: item
         label: "{{ (item.svc | d(item.item)).name }}"
 
+    - name: "Record: Libvirt functional socket check ({{ selected_node }})"
+      ansible.builtin.include_role:
+        name: validation_common
+        tasks_from: record_result.yml
+      vars:
+        _socket_ok: "{{ virsh_socket_check.rc == 0 }}"
+        result_key: "[{{ selected_node }}] Libvirt socket operational (virsh) post-reboot"
+        result_value: "{{ 'ok' if _socket_ok else 'failed' }}"
+        result_comment: >-
+          {{
+            '' if _socket_ok else
+            ('virsh connection failed (rc=' ~ virsh_socket_check.rc ~ '): ' ~
+            (virsh_socket_check.stderr | d('') | trim | truncate(160, true, '...')))
+          }}
+
     - name: "Record: Journalctl boot error check ({{ selected_node }})"
       when: validation.host_reboot.check_journal_errors | d(true)
       ansible.builtin.include_role:
         name: validation_common
         tasks_from: record_result.yml
       vars:
+        _cmd_ok: "{{ (post_boot_journal.rc | d(0)) == 0 }}"
         _err_count: "{{ (_journal_filtered_errors | default([])) | length }}"
-        _is_clean: "{{ _err_count | int == 0 }}"
+        _is_clean: "{{ _cmd_ok and (_err_count | int == 0) }}"
         result_key: "[{{ selected_node }}] System journal post-reboot error check"
         result_value: "{{ 'ok' if _is_clean else 'failed' }}"
         result_comment: |
-          {% if not _is_clean -%}
+          {% if not _cmd_ok -%}
+          Failed to query journalctl (rc={{ post_boot_journal.rc }}): {{ post_boot_journal.stderr | d('') | trim }}
+          {% elif _err_count | int > 0 -%}
           Found {{ _err_count }} error entries in journal:
           {% for err in _journal_filtered_errors | default([]) -%}
           - {{ err }}
