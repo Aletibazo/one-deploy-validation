@@ -87,6 +87,47 @@
         loop_var: svc
         label: "{{ svc.name }}"
 
+# ------------------------------------------------------------------ #
+    # Open vSwitch Post-Reboot Configuration Verification                #
+    # ------------------------------------------------------------------ #
+    - name: "Determine if post-reboot OVS config verification applies to {{ selected_node }}"
+      ansible.builtin.set_fact:
+        _ovs_check_enabled: >-
+          {%- set svc_names = [] -%}
+          {%- for s in (validation.host_reboot.required_services | d([])) -%}
+            {%- set _ = svc_names.append(s.name if s is mapping else (s | string)) -%}
+          {%- endfor -%}
+          {%- set has_ovs_svc = 'opennebula-ovs.service' in svc_names -%}
+          {%- set node_vars = hostvars[selected_node] | d({}) -%}
+          {%- set has_ovs_inv = (node_vars.ovs is defined) and (node_vars.ovs is mapping) and ((node_vars.ovs | length) > 0) -%}
+          {{ has_ovs_svc and has_ovs_inv }}
+
+    - name: "Ensure network facts are gathered on {{ selected_node }} for OVS template resolution"
+      ansible.builtin.setup:
+        gather_subset:
+          - '!all'
+          - '!min'
+          - 'network'
+      delegate_to: "{{ selected_node }}"
+      delegate_facts: true
+      when:
+        - _ovs_check_enabled | bool
+        - hostvars[selected_node].ansible_default_ipv4 is not defined
+
+    - name: "Verify post-reboot OVS configuration against inventory on {{ selected_node }}"
+      when: _ovs_check_enabled | bool
+      become: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - "{{ lookup('file', role_path ~ '/files/verify_ovs_config.py') }}"
+        stdin: "{{ hostvars[selected_node]['ovs'] | to_json }}"
+      delegate_to: "{{ selected_node }}"
+      register: post_boot_ovs_check
+      failed_when: false
+      changed_when: false
+
     - name: "Validate Libvirt socket via functional virsh query on {{ selected_node }}"
       ansible.builtin.command: virsh uri
       delegate_to: "{{ selected_node }}"
@@ -197,6 +238,28 @@
             ('virsh connection failed (rc=' ~ virsh_socket_check.rc ~ '): ' ~
             (virsh_socket_check.stderr | d('') | trim | truncate(160, true, '...')))
           }}
+
+    - name: "Record: OVS configuration verification ({{ selected_node }})"
+      when: _ovs_check_enabled | bool
+      ansible.builtin.include_role:
+        name: validation_common
+        tasks_from: record_result.yml
+      vars:
+        _ovs_cmd_ok: "{{ (post_boot_ovs_check.rc | d(1)) == 0 }}"
+        _ovs_parsed: "{{ (post_boot_ovs_check.stdout | d('{}')) | from_json if _ovs_cmd_ok else {} }}"
+        _ovs_is_valid: "{{ _ovs_cmd_ok and (_ovs_parsed.ok | d(false) | bool) }}"
+        _ovs_mismatches: "{{ _ovs_parsed.mismatches | d([]) }}"
+        result_key: "[{{ selected_node }}] OVS configuration matches inventory post-reboot"
+        result_value: "{{ 'ok' if _ovs_is_valid else 'failed' }}"
+        result_comment: |
+          {% if not _ovs_cmd_ok -%}
+          Failed to execute OVS config check (rc={{ post_boot_ovs_check.rc }}): {{ post_boot_ovs_check.stderr | d('') | trim }}
+          {% elif not _ovs_is_valid -%}
+          Found {{ _ovs_mismatches | length }} OVS configuration mismatch(es) (checked {{ _ovs_parsed.checked | d(0) }} settings):
+          {% for err in _ovs_mismatches -%}
+          - {{ err }}
+          {% endfor -%}
+          {% endif %}
 
     - name: "Record: Journalctl boot error check ({{ selected_node }})"
       when: validation.host_reboot.check_journal_errors | d(true)
