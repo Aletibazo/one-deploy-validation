@@ -4,6 +4,10 @@ validation:
   host_reboot:
     # Target node inventory name. If empty, defaults to the first host in node_group
     target_nodes: "all"
+    allow_frontend_shutdown: false
+    frontend_shutdown_retries: 30
+    frontend_service_retries: 30
+    frontend_poll_delay: 5
     reboot_timeout: 600
     connect_timeout: 10
     monitored_wait_retries: 30

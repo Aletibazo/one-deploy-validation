@@ -70,6 +70,11 @@ validation:
     # a comma-separated string (e.g., "node1, node2"), or "all" to target
     # every host in the 'node' group sequentially.
     target_nodes: "all"
+    # Set true only when Ansible runs outside the hosts and frontend VMs under test.
+    allow_frontend_shutdown: false
+    frontend_shutdown_retries: 30
+    frontend_service_retries: 30
+    frontend_poll_delay: 5
     # Maximum time (in seconds) to wait for the node to come back online
     # and accept an SSH connection after the reboot command is issued.
     reboot_timeout: 600
@@ -450,16 +455,6 @@ validation:
     rpc2_proto: "http"
     rpc2_path: "/RPC2"
     rpc2_skip_tls_verify: true
-
-  # TEST CASE NAME: Host monitoring recovery after normal reboot
-  # Reboots one monitored hypervisor per validated cluster, even if it runs
-  # VMs. Sets the OpenNebula host offline first, then enables it after reboot.
-  # The selected host must return to MONITORED after being enabled.
-  run_host_reboot: false
-  host_reboot:
-    reboot_timeout: 600
-    monitoring_timeout: 600
-    poll_interval: 10
 
   # TEST CASE NAME: VM High Availability
   # DESCRIPTION: The prerequisite is to have VM HA configured, see details in OpenNebula documentation.

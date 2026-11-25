@@ -17,11 +17,11 @@ Because this is a destructive test that briefly removes compute capacity, it is 
 ## How it works
 
 1. **Target Selection:** The test runs from the frontend group, iterating over the hypervisors defined in `validation.host_reboot.target_nodes`. Targets map exactly to hostnames in the Ansible `node` inventory group.
-2. **Safety Guard:** For each target node, the role queries Libvirt (`virsh list --name`) to see if it is currently hosting the active OpenNebula Frontend VM. If the Frontend is running on the target node, the role safely skips the reboot to prevent a control-plane blackout and records `skipped - hypervisor hosts an OpenNebula Frontend`.
+2. **Safety Guard:** For each target node, the role queries Libvirt (`virsh list --name`) to see if it is currently hosting the active OpenNebula Frontend VM. By default, if a frontend domain is active on the target node, the role skips the reboot and records `skipped - hypervisor hosts an OpenNebula Frontend`.
 3. **Phase 1 (Pre-Reboot & Isolation):** The pre-reboot `boot_id` is captured. The node is registered in the test manifest (with the list of monitored services attached as details), and it is isolated from OpenNebula scheduling using `onehost offline`.
 4. **Phase 2 (Reboot):** The `reboot` module is triggered on the hypervisor. Ansible waits for SSH to return based on the configured timeouts.
 5. **Phase 3 (Post-Reboot Verification):**
-    * A new `boot_id` is captured to prove a hardware reset occurred.
+    * The role compares the pre and post-reboot `boot_id` values to confirm a new kernel boot.
     * The role uses systemd to verify that all daemons listed in `validation.host_reboot.required_services` are `active`.
     * `journalctl -b 0` is queried for errors, filtering out expected/harmless warnings defined in `journal_exclude_patterns`.
 6. **Phase 4 (OpenNebula Reconciliation):** The node is brought back online (`onehost enable` + `onehost forceupdate`). The role polls the frontend until the node's state returns to `MONITORED` (`on`).
@@ -40,6 +40,10 @@ Because this is a destructive test that briefly removes compute capacity, it is 
 |---|---|---|
 | `validation.run_host_reboot` | `false` | Enable/disable the entire reboot validation test. |
 | `validation.host_reboot.target_nodes` | `"all"` | Which nodes to test. Can be `"all"`, a comma-separated string, or a YAML list of inventory hostnames (e.g., `["host2", "host3"]`). |
+| `validation.host_reboot.allow_frontend_shutdown` | `false` | Gracefully shut down and restore frontend VMs when rebooting their hypervisor. |
+| `validation.host_reboot.frontend_shutdown_retries` | `30` | Retries while waiting for each frontend VM to shut off. |
+| `validation.host_reboot.frontend_service_retries` | `30` | Retries while waiting for each configured frontend service to become active. |
+| `validation.host_reboot.frontend_poll_delay` | `5` | Delay in seconds between frontend shutdown or service checks. |
 | `validation.host_reboot.reboot_timeout` | `600` | Maximum time in seconds to wait for the host to complete the reboot cycle and accept SSH. |
 | `validation.host_reboot.connect_timeout` | `10` | Maximum time in seconds for individual SSH polling attempts during the recovery phase. |
 | `validation.host_reboot.monitored_wait_retries` | `30` | Number of times to poll OpenNebula to check if the host has reached the `MONITORED` state. |
@@ -48,6 +52,41 @@ Because this is a destructive test that briefly removes compute capacity, it is 
 | `validation.host_reboot.check_journal_errors` | `true` | Enables post-reboot inspection of `journalctl` for errors. |
 | `validation.host_reboot.journal_priority` | `"err"` | The syslog priority level to query. `err` (3) is standard. |
 | `validation.host_reboot.journal_exclude_patterns` | `["ACPI BIOS Error", "pci.*aer"]` | Regex patterns for log entries that should be ignored (e.g., known harmless hardware/firmware warnings). |
+
+## Including hypervisors that run frontend VMs
+
+The role uses frontend inventory hostnames as exact libvirt domain names. A
+hypervisor with no matching domains is treated as having no frontend VMs. Keep
+frontend VM placement stable during the run.
+
+Merge these settings into the existing group vars YAML and retain the other
+`host_reboot` settings and the full list of required frontend services.
+
+```yaml
+validation:
+  run_host_reboot: true
+  host_reboot:
+    target_nodes: all
+    allow_frontend_shutdown: true
+  core_services:
+    service_list:
+      - name: opennebula.service
+        desc: OpenNebula core
+      - name: opennebula-flow.service
+        desc: OpenNebula Flow
+```
+
+The role checks domain placement before rebooting any host. For each selected
+hypervisor, it takes the host offline in OpenNebula, requests graceful shutdown
+of any active frontend VMs there, and waits for them to power off before
+rebooting the host. Afterward, it starts those VMs if libvirt has not autostarted
+them and checks each configured service on each recovered frontend. This check
+is read-only and runs independently of `validation.run_core_services`.
+
+The role stops the sequence if shutdown, frontend recovery, or OpenNebula host
+monitoring fails. It attempts to restore affected frontend VMs before trying to
+re-enable the host in OpenNebula. Frontend SSH and service results appear in the
+Host Reboot Validation report.
 
 ## Example
 
